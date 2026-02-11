@@ -1,0 +1,111 @@
+SQL Big Big Query
+1. Création de la Table de Reporting (La "Master Table")
+Cette requête est la colonne vertébrale du projet. Elle rassemble les 4 piliers (Finance, Marketing, Retail, Assurance) pour alimenter le Dashboard.
+/* ETAPE 1 : Consolidation des données
+BUT : Créer une vue unique pour le dashboard.
+PILLIERS : Tous.
+*/
+
+CREATE OR REPLACE TABLE `my-first-projet-408412.olist_data.master_reporting` AS
+SELECT 
+    -- MARKETING : Localisation du client
+    c.customer_unique_id,
+    c.customer_city,
+    c.customer_state,
+
+    -- RETAIL : Détails de la commande et produit
+    o.order_id,
+    p.product_category_name,
+    CAST(o.order_purchase_timestamp AS TIMESTAMP) as date_achat,
+
+    -- FINANCE : Chiffre d'affaires
+    oi.price as prix_article,
+    oi.freight_value as frais_port,
+    (oi.price + oi.freight_value) as total_commande,
+
+    -- ASSURANCE & QUALITÉ : Satisfaction et Délais
+    r.review_score,
+    -- Calcul du retard : Date de livraison réelle VS Date estimée
+    DATE_DIFF(DATE(CAST(o.order_delivered_customer_date AS TIMESTAMP)), 
+              DATE(CAST(o.order_estimated_delivery_date AS TIMESTAMP)), DAY) as jours_retard
+              
+FROM `my-first-projet-408412.olist_data.olist_orders` o
+JOIN `my-first-projet-408412.olist_data.olist_customers` c ON o.customer_id = c.customer_id
+JOIN `my-first-projet-408412.olist_data.olist_order_items` oi ON o.order_id = oi.order_id
+LEFT JOIN `my-first-projet-408412.olist_data.olist_products` p ON oi.product_id = p.product_id
+LEFT JOIN `my-first-projet-408412.olist_data.olist_order_reviews` r ON o.order_id = r.order_id
+WHERE o.order_status = 'delivered';
+
+2. Segmentation Client RFM (Marketing & Finance)
+Cette requête permet de classer les clients selon leur valeur. Notez la correction de la date au 17/10/2018 pour éviter le décalage temporel.
+
+/* ETAPE 2 : Analyse RFM (Récence, Fréquence, Montant)
+BUT : Identifier les clients VIP et les clients perdus.
+PILLIERS : Marketing, Finance.
+*/
+
+WITH rfm_stats AS (
+  SELECT 
+    customer_unique_id,
+    -- Calcul de la récence par rapport à la fin du dataset (17 oct 2018)
+    DATE_DIFF(DATE('2018-10-17'), DATE(MAX(date_achat)), DAY) as recence_jours,
+    -- Fréquence : nombre de commandes uniques
+    COUNT(DISTINCT order_id) as frequence,
+    -- Montant : total dépensé
+    SUM(prix_article) as montant_total
+  FROM `my-first-projet-408412.olist_data.master_reporting`
+  GROUP BY customer_unique_id
+)
+
+SELECT 
+  *,
+  -- Segmentation simplifiée
+  CASE 
+    WHEN montant_total > 1000 THEN 'VIP'
+    WHEN frequence > 1 THEN 'Fidèle'
+    WHEN recence_jours > 300 THEN 'Perdu'
+    ELSE 'Standard'
+  END as segment_client
+FROM rfm_stats
+ORDER BY montant_total DESC;
+
+3. Analyse du "Paradoxe Qualité" (Assurance & Retail)
+Cette requête isole les produits qui reçoivent des notes de 1/5 alors qu'ils ont été livrés en avance. C'est l'analyse phare du projet.
+
+/* ETAPE 3 : Analyse des Insatisfactions Produits
+BUT : Comprendre pourquoi certains produits déçoivent malgré une logistique rapide.
+PILLIERS : Assurance, Retail.
+*/
+
+SELECT 
+    product_category_name,
+    COUNT(order_id) as nb_commandes_insatisfaites,
+    ROUND(AVG(prix_article), 2) as prix_moyen,
+    -- Moyenne du retard (sera négative ici car on filtre sur l'avance)
+    ROUND(AVG(jours_retard), 1) as avance_moyenne_jours
+FROM `my-first-projet-408412.olist_data.master_reporting`
+WHERE review_score = 1 
+  AND jours_retard < 0 -- Le client a reçu son colis en AVANCE
+GROUP BY 1
+HAVING nb_commandes_insatisfaites > 5
+ORDER BY nb_commandes_insatisfaites DESC;
+
+4. Analyse Géographique des Risques (Assurance & Logistique)
+Cette requête permet de voir quels États brésiliens sont les plus problématiques pour les livraisons.
+
+/* ETAPE 4 : Diagnostic Logistique par État
+BUT : Identifier où l'assurance logistique doit être renforcée.
+PILLIERS : Assurance, Retail.
+*/
+
+SELECT 
+    customer_state,
+    COUNT(order_id) as volume_total,
+    -- Pourcentage de commandes arrivées en retard
+    ROUND(AVG(CASE WHEN jours_retard > 0 THEN 1 ELSE 0 END) * 100, 2) as pourcentage_retard,
+    -- Note de satisfaction moyenne de l'État
+    ROUND(AVG(review_score), 2) as score_satisfaction_moyen
+FROM `my-first-projet-408412.olist_data.master_reporting`
+GROUP BY customer_state
+ORDER BY pourcentage_retard DESC;
+
